@@ -10,6 +10,14 @@
       <div class="page-nav">
         <button :class="['nav-tab', currentView === 'analyzer' ? 'active' : '']" @click="currentView = 'analyzer'">Analyzer</button>
         <button :class="['nav-tab', currentView === 'cal' ? 'active' : '']" @click="currentView = 'cal'">Calculator</button>
+        <button :class="['nav-tab', currentView === 'portfolio' ? 'active' : '']" @click="currentView = 'portfolio'">
+          Portfolio
+          <span v-if="portfolioStocks.length" class="nav-tab-badge">{{ portfolioStocks.length }}/{{ maxPositions }}</span>
+        </button>
+        <button :class="['nav-tab', currentView === 'mypos' ? 'active' : '']" @click="currentView = 'mypos'">
+          My Positions
+          <span v-if="myPositions.length" class="nav-tab-badge">{{ myPositions.length }}</span>
+        </button>
       </div>
 
       <!-- ═══ ANALYZER VIEW ═══ -->
@@ -409,12 +417,359 @@
         </template>
       </template><!-- end cal view -->
 
+      <!-- ═══ PORTFOLIO VIEW ═══ -->
+      <template v-if="currentView === 'portfolio'">
+
+        <!-- Tier info + add form -->
+        <div class="form-card">
+          <div class="port-tier">
+            <div class="port-tier-top">
+              <div class="port-tier-left">
+                <span class="port-tier-label">Bankroll Tier</span>
+                <span class="port-tier-amount">${{ bankroll.toLocaleString() }}</span>
+              </div>
+              <span class="port-tier-badge">Max {{ maxPositions }} positions</span>
+            </div>
+            <div class="port-tier-note">{{ positionTierNote }}</div>
+            <div class="port-tier-math">
+              2% risk/trade = <b>${{ fmt(bankroll * 0.02) }}</b> per position &nbsp;·&nbsp;
+              10% total cap = <b>${{ fmt(bankroll * 0.10) }}</b> &nbsp;·&nbsp;
+              {{ maxPositions }} slots × <b>${{ fmt(bankroll * 0.02) }}</b>/each
+            </div>
+          </div>
+
+          <div class="form-row" style="margin-top:1.25rem">
+            <div class="field">
+              <label>Add Ticker ({{ portfolioStocks.length }}/{{ maxPositions }} filled)</label>
+              <input v-model="portfolioTicker" type="text" placeholder="AAPL" maxlength="10"
+                     @keyup.enter="addPortfolioStock"
+                     :disabled="portfolioStocks.length >= maxPositions || portfolioLoading" />
+            </div>
+            <div class="field">
+              <label>Bankroll ($)</label>
+              <input v-model.number="bankroll" type="number" min="100" step="100" placeholder="10000" />
+            </div>
+            <div class="field">
+              <label>Trades / Year</label>
+              <input v-model.number="tradesPerYear" type="number" min="1" max="365" step="1" placeholder="20" style="width:100px" />
+            </div>
+            <button class="btn-primary" @click="addPortfolioStock"
+                    :disabled="portfolioLoading || portfolioStocks.length >= maxPositions">
+              {{ portfolioLoading ? 'Fetching…' : 'Add Stock' }}
+            </button>
+            <button v-if="portfolioStocks.length" class="btn-secondary" @click="clearPortfolio">Clear All</button>
+          </div>
+          <div v-if="portfolioError" class="port-error">{{ portfolioError }}</div>
+        </div>
+
+        <!-- Selected positions -->
+        <div v-if="portfolioStocks.length" class="port-stocks-card">
+          <div class="port-stocks-header">
+            <span class="port-stocks-title">Selected Positions</span>
+            <span class="port-stocks-slots">{{ portfolioStocks.length }} of {{ maxPositions }} slots · {{ maxPositions - portfolioStocks.length }} remaining</span>
+          </div>
+
+          <div v-for="(s, i) in portfolioStocks" :key="s.symbol" class="port-stock-row">
+            <button class="port-remove" @click="removePortfolioStock(i)" title="Remove">✕</button>
+            <div class="port-stock-id">
+              <div class="port-stock-sym">{{ s.symbol }}</div>
+              <div class="port-stock-price">${{ fmt(s.current_price) }}</div>
+            </div>
+            <div class="port-stock-cells">
+              <div class="port-cell">
+                <div class="port-cell-lbl">Entry</div>
+                <div class="port-cell-val port-accent">${{ fmt(s.entry_price) }}</div>
+              </div>
+              <div class="port-cell">
+                <div class="port-cell-lbl">Stop Loss</div>
+                <div class="port-cell-val port-danger">${{ fmt(s.stop_price) }}</div>
+                <div class="port-cell-sub">−${{ fmt(s.stop_distance) }} (2×ATR)</div>
+              </div>
+              <div class="port-cell">
+                <div class="port-cell-lbl">Target</div>
+                <div class="port-cell-val port-success">${{ fmt(s.profit_target) }}</div>
+                <div class="port-cell-sub">+${{ fmt(s.profit_target - s.entry_price) }}</div>
+              </div>
+              <div class="port-cell">
+                <div class="port-cell-lbl">Shares</div>
+                <div class="port-cell-val">{{ s.suggested_shares }}</div>
+              </div>
+              <div class="port-cell">
+                <div class="port-cell-lbl">Deployed</div>
+                <div class="port-cell-val">${{ fmt(s.position_value) }}</div>
+                <div class="port-cell-sub">{{ fmt(s.position_value / bankroll * 100) }}% of bankroll</div>
+              </div>
+              <div class="port-cell">
+                <div class="port-cell-lbl">$ at Risk</div>
+                <div class="port-cell-val port-danger">${{ fmt(s.suggested_shares * s.stop_distance) }}</div>
+                <div class="port-cell-sub">{{ fmt(s.actual_risk_pct) }}% of bankroll</div>
+              </div>
+              <div class="port-cell">
+                <div class="port-cell-lbl">EAR</div>
+                <div class="port-cell-val" :class="s.expected_annual_return_pct >= 0 ? 'port-success' : 'port-danger'">
+                  {{ fmt(s.expected_annual_return_pct) }}%
+                </div>
+                <div class="port-cell-sub">~{{ s.trades_per_year }} trades/yr</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Portfolio Summary -->
+        <div v-if="portfolioSummary" class="port-summary-card">
+          <h2 class="section-title">Portfolio Risk Summary</h2>
+
+          <div class="port-sum-grid">
+            <div class="port-sum-item">
+              <div class="port-sum-lbl">Positions</div>
+              <div class="port-sum-val">{{ portfolioStocks.length }} / {{ maxPositions }}</div>
+              <div class="port-sum-note">{{ maxPositions - portfolioStocks.length }} slot(s) open</div>
+            </div>
+            <div class="port-sum-item">
+              <div class="port-sum-lbl">Total Deployed</div>
+              <div class="port-sum-val">${{ fmt(portfolioSummary.totalDeployed) }}</div>
+              <div class="port-sum-note">{{ fmt(portfolioSummary.totalDeployed / bankroll * 100) }}% of bankroll</div>
+            </div>
+            <div class="port-sum-item" :class="portfolioSummary.cashRemaining < 0 ? 'port-sum-warn' : ''">
+              <div class="port-sum-lbl">Cash Remaining</div>
+              <div class="port-sum-val" :class="portfolioSummary.cashRemaining < 0 ? 'port-danger' : ''">
+                ${{ fmt(portfolioSummary.cashRemaining) }}
+              </div>
+              <div class="port-sum-note">{{ portfolioSummary.cashRemaining < 0 ? '⚠ Requires margin' : 'Available liquidity' }}</div>
+            </div>
+            <div class="port-sum-item" :class="portfolioSummary.totalRiskPct > 10 ? 'port-sum-over' : 'port-sum-ok'">
+              <div class="port-sum-lbl">Total $ at Risk</div>
+              <div class="port-sum-val">${{ fmt(portfolioSummary.totalAtRisk) }}</div>
+              <div class="port-sum-note" :class="portfolioSummary.totalRiskPct > 10 ? 'port-danger' : 'port-success'">
+                {{ fmt(portfolioSummary.totalRiskPct) }}% of bankroll —
+                {{ portfolioSummary.totalRiskPct <= 10 ? '✓ Within 10% rule' : '✗ Exceeds 10% limit' }}
+              </div>
+            </div>
+          </div>
+
+          <!-- Risk allocation bars -->
+          <div class="port-risk-section">
+            <div class="port-risk-header">
+              <span>Risk Allocation by Position</span>
+              <span class="port-risk-limit-note">10% limit = ${{ fmt(bankroll * 0.10) }}</span>
+            </div>
+
+            <div v-for="s in portfolioStocks" :key="s.symbol + '_bar'" class="port-risk-row">
+              <span class="port-risk-sym">{{ s.symbol }}</span>
+              <div class="port-risk-bar-bg">
+                <div class="port-risk-bar-fill"
+                     :style="{ width: Math.min(100, s.actual_risk_pct / 10 * 100) + '%',
+                               background: s.actual_risk_pct > 2.5 ? 'var(--danger)' : 'var(--accent)' }"></div>
+              </div>
+              <span class="port-risk-pct">{{ fmt(s.actual_risk_pct) }}%</span>
+              <span class="port-risk-dollars">${{ fmt(s.suggested_shares * s.stop_distance) }}</span>
+            </div>
+
+            <!-- Combined total bar -->
+            <div class="port-risk-row port-risk-total">
+              <span class="port-risk-sym">TOTAL</span>
+              <div class="port-risk-bar-bg">
+                <div class="port-risk-bar-fill"
+                     :style="{ width: Math.min(100, portfolioSummary.totalRiskPct / 10 * 100) + '%',
+                               background: portfolioSummary.totalRiskPct > 10 ? 'var(--danger)' : 'var(--success)' }"></div>
+              </div>
+              <span class="port-risk-pct" :class="portfolioSummary.totalRiskPct > 10 ? 'port-danger' : 'port-success'">
+                {{ fmt(portfolioSummary.totalRiskPct) }}%
+              </span>
+              <span class="port-risk-dollars">${{ fmt(portfolioSummary.totalAtRisk) }}</span>
+            </div>
+
+            <!-- 10% limit marker annotation -->
+            <div class="port-risk-rule-note">
+              The 10% cap assumes uncorrelated positions. In a broad market selloff, all stops can trigger simultaneously —
+              diversify sectors and watch correlation.
+            </div>
+          </div>
+        </div>
+
+        <!-- Empty state -->
+        <div v-if="!portfolioStocks.length" class="port-empty">
+          <div class="port-empty-title">No positions selected</div>
+          <div class="port-empty-sub">
+            Add up to {{ maxPositions }} stocks above to see your combined risk exposure and whether you're within the 3-5-7 rules.
+          </div>
+        </div>
+
+      </template><!-- end portfolio view -->
+
+      <!-- ═══ MY POSITIONS VIEW ═══ -->
+      <template v-if="currentView === 'mypos'">
+
+        <!-- Header + add form -->
+        <div class="form-card">
+          <div class="mypos-header-row">
+            <div>
+              <div class="mypos-title">My Positions</div>
+              <div class="mypos-subtitle">Saved in your browser only — private to this device &amp; session</div>
+            </div>
+            <button class="btn-secondary" @click="refreshAllPositions"
+                    :disabled="myRefreshing || !myPositions.length">
+              {{ myRefreshing ? 'Refreshing…' : 'Refresh Live Prices' }}
+            </button>
+          </div>
+
+          <div class="form-row" style="margin-top:1.25rem;border-top:1px solid var(--border);padding-top:1.25rem;">
+            <div class="field">
+              <label>Ticker</label>
+              <input v-model="myTicker" type="text" placeholder="AAPL" maxlength="10" @keyup.enter="addMyPosition" />
+            </div>
+            <div class="field">
+              <label>Price I Paid ($)</label>
+              <input v-model="myEntryPrice" type="number" min="0.01" step="0.01" placeholder="182.50" style="width:130px" />
+            </div>
+            <div class="field">
+              <label>Shares I Own</label>
+              <input v-model="myShares" type="number" min="1" step="1" placeholder="25" style="width:110px" />
+            </div>
+            <div class="field">
+              <label>Bankroll ($)</label>
+              <input v-model.number="bankroll" type="number" min="100" step="100" placeholder="10000" />
+            </div>
+            <button class="btn-primary" @click="addMyPosition" :disabled="myAddLoading">
+              {{ myAddLoading ? 'Adding…' : 'Add Position' }}
+            </button>
+          </div>
+          <div v-if="myFormError" class="port-error">{{ myFormError }}</div>
+        </div>
+
+        <!-- Saved positions -->
+        <div v-if="myPositions.length" class="mypos-list">
+          <div v-for="pos in myPositions" :key="pos.id" class="mypos-row">
+
+            <!-- Status badge -->
+            <div class="mypos-status-col">
+              <span v-if="!myLiveData[pos.id]" class="mypos-badge mypos-badge-loading">LOADING</span>
+              <span v-else-if="myLiveData[pos.id].error" class="mypos-badge mypos-badge-err" :title="myLiveData[pos.id].error">ERR</span>
+              <span v-else :class="['mypos-badge', 'mypos-badge-' + myPosStatus(pos)]">
+                {{ { profit:'▲ PROFIT', drawdown:'▼ HOLD', stopped:'✕ STOPPED', target:'★ TARGET' }[myPosStatus(pos)] || '—' }}
+              </span>
+            </div>
+
+            <!-- Symbol + date -->
+            <div class="mypos-id-col">
+              <div class="mypos-sym">{{ pos.symbol }}</div>
+              <div class="mypos-date">{{ pos.dateAdded }}</div>
+            </div>
+
+            <!-- Data cells -->
+            <div class="mypos-cells">
+              <div class="mypos-cell">
+                <div class="mypos-cell-lbl">Entry</div>
+                <div class="mypos-cell-val">${{ fmt(pos.entryPrice) }}</div>
+                <div class="mypos-cell-sub">{{ pos.shares }} shares</div>
+              </div>
+              <div class="mypos-cell">
+                <div class="mypos-cell-lbl">Live Price</div>
+                <div class="mypos-cell-val"
+                     :class="myLiveData[pos.id] && !myLiveData[pos.id].error
+                               ? (myLiveData[pos.id].current_price >= pos.entryPrice ? 'port-success' : 'port-danger')
+                               : ''">
+                  {{ myLiveData[pos.id] && !myLiveData[pos.id].error ? '$' + fmt(myLiveData[pos.id].current_price) : '—' }}
+                </div>
+              </div>
+              <div class="mypos-cell mypos-cell-pnl">
+                <div class="mypos-cell-lbl">Unrealized P&amp;L</div>
+                <template v-if="myPosPnL(pos)">
+                  <div class="mypos-cell-val" :class="myPosPnL(pos).dollars >= 0 ? 'port-success' : 'port-danger'">
+                    {{ myPosPnL(pos).dollars >= 0 ? '+' : '' }}${{ fmt(myPosPnL(pos).dollars) }}
+                  </div>
+                  <div class="mypos-cell-sub" :class="myPosPnL(pos).pct >= 0 ? 'port-success' : 'port-danger'">
+                    {{ myPosPnL(pos).pct >= 0 ? '+' : '' }}{{ fmt(myPosPnL(pos).pct) }}%
+                  </div>
+                </template>
+                <div v-else class="mypos-cell-val">—</div>
+              </div>
+              <div class="mypos-cell">
+                <div class="mypos-cell-lbl">Cost Basis</div>
+                <div class="mypos-cell-val">${{ fmt(pos.entryPrice * pos.shares) }}</div>
+                <div class="mypos-cell-sub" v-if="myPosPnL(pos)">Now ${{ fmt(myPosPnL(pos).currentValue) }}</div>
+              </div>
+              <div class="mypos-cell">
+                <div class="mypos-cell-lbl">Stop Loss</div>
+                <div class="mypos-cell-val port-danger">
+                  {{ myLiveData[pos.id] && !myLiveData[pos.id].error ? '$' + fmt(myLiveData[pos.id].stop_price) : '—' }}
+                </div>
+                <div class="mypos-cell-sub">Entry − 2× ATR</div>
+              </div>
+              <div class="mypos-cell">
+                <div class="mypos-cell-lbl">Target</div>
+                <div class="mypos-cell-val port-success">
+                  {{ myLiveData[pos.id] && !myLiveData[pos.id].error ? '$' + fmt(myLiveData[pos.id].profit_target) : '—' }}
+                </div>
+                <div class="mypos-cell-sub">7:3 reward:risk</div>
+              </div>
+              <div class="mypos-cell">
+                <div class="mypos-cell-lbl">$ at Risk</div>
+                <div class="mypos-cell-val port-danger">
+                  {{ myPosPnL(pos) ? '$' + fmt(myPosPnL(pos).atRisk) : '—' }}
+                </div>
+                <div class="mypos-cell-sub" v-if="myPosPnL(pos)">
+                  {{ fmt(myPosPnL(pos).atRisk / bankroll * 100) }}% of bankroll
+                </div>
+              </div>
+            </div>
+
+            <button class="port-remove" @click="removeMyPosition(pos.id)" title="Remove position">✕</button>
+          </div>
+        </div>
+
+        <!-- Summary card -->
+        <div v-if="myPortfolioSummary" class="port-summary-card">
+          <h2 class="section-title">Portfolio Summary</h2>
+          <div class="port-sum-grid">
+            <div class="port-sum-item">
+              <div class="port-sum-lbl">Cost Basis</div>
+              <div class="port-sum-val">${{ fmt(myPortfolioSummary.totalCost) }}</div>
+              <div class="port-sum-note">{{ myPositions.length }} position(s) with live data</div>
+            </div>
+            <div class="port-sum-item">
+              <div class="port-sum-lbl">Current Value</div>
+              <div class="port-sum-val">${{ fmt(myPortfolioSummary.totalCurrentValue) }}</div>
+              <div class="port-sum-note">At live prices</div>
+            </div>
+            <div class="port-sum-item" :class="myPortfolioSummary.totalPnL >= 0 ? 'port-sum-ok' : 'port-sum-warn'">
+              <div class="port-sum-lbl">Unrealized P&amp;L</div>
+              <div class="port-sum-val" :class="myPortfolioSummary.totalPnL >= 0 ? 'port-success' : 'port-danger'">
+                {{ myPortfolioSummary.totalPnL >= 0 ? '+' : '' }}${{ fmt(myPortfolioSummary.totalPnL) }}
+              </div>
+              <div class="port-sum-note">
+                {{ myPortfolioSummary.totalPnL >= 0 ? '+' : '' }}{{ fmt(myPortfolioSummary.totalPnLPct) }}% on cost
+              </div>
+            </div>
+            <div class="port-sum-item" :class="myPortfolioSummary.totalRiskPct > 10 ? 'port-sum-over' : 'port-sum-ok'">
+              <div class="port-sum-lbl">Total $ at Risk</div>
+              <div class="port-sum-val">${{ fmt(myPortfolioSummary.totalAtRisk) }}</div>
+              <div class="port-sum-note" :class="myPortfolioSummary.totalRiskPct > 10 ? 'port-danger' : 'port-success'">
+                {{ fmt(myPortfolioSummary.totalRiskPct) }}% —
+                {{ myPortfolioSummary.totalRiskPct <= 10 ? '✓ Within 10% rule' : '✗ Exceeds 10% limit' }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Empty state -->
+        <div v-if="!myPositions.length" class="port-empty">
+          <div class="port-empty-title">No saved positions yet</div>
+          <div class="port-empty-sub">
+            Enter the ticker, price you paid, and how many shares you own.
+            Everything saves to <b>your browser only</b> — other visitors on this
+            site see their own separate data.
+          </div>
+        </div>
+
+      </template><!-- end mypos view -->
+
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, computed, watch, onMounted } from 'vue'
 import {
   Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale,
   BarController, BarElement, Filler, Legend, Tooltip,
@@ -830,6 +1185,203 @@ function saveResult() {
 const fmt = n => n==null ? '—' : Math.abs(n)>=1000
   ? n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})
   : n.toFixed(2)
+
+// ── Portfolio ──────────────────────────────────────────────────────────────
+const portfolioTicker  = ref('')
+const portfolioLoading = ref(false)
+const portfolioError   = ref(null)
+const portfolioStocks  = ref([])
+
+function tierFor(br) {
+  if (br >= 50000) return 3
+  if (br >= 25000) return 2
+  return 1
+}
+
+const maxPositions = computed(() => {
+  if (bankroll.value >= 50000) return 5
+  if (bankroll.value >= 25000) return 4
+  return 3
+})
+
+const positionTierNote = computed(() => {
+  if (bankroll.value >= 50000) return 'Full capacity — $50k+ bankroll supports 5 simultaneous positions'
+  if (bankroll.value >= 25000) return 'Scaling tier — $25k–$49k supports 4 positions'
+  return 'Starter tier — under $25k: 3 positions limits correlation risk and margin strain'
+})
+
+const portfolioSummary = computed(() => {
+  const stocks = portfolioStocks.value
+  if (!stocks.length) return null
+  const totalDeployed = stocks.reduce((s, r) => s + r.position_value, 0)
+  const totalAtRisk   = stocks.reduce((s, r) => s + (r.suggested_shares * r.stop_distance), 0)
+  const totalRiskPct  = bankroll.value > 0 ? totalAtRisk / bankroll.value * 100 : 0
+  const cashRemaining = bankroll.value - totalDeployed
+  return { totalDeployed, totalAtRisk, totalRiskPct, cashRemaining }
+})
+
+watch(bankroll, (newVal, oldVal) => {
+  localStorage.setItem('357_bankroll', String(newVal))
+  if (tierFor(newVal) !== tierFor(oldVal) && portfolioStocks.value.length > 0) {
+    portfolioStocks.value = []
+    portfolioError.value = 'Bankroll tier changed — portfolio cleared. Re-add your stocks.'
+  }
+})
+
+async function addPortfolioStock() {
+  const t = portfolioTicker.value.trim().toUpperCase()
+  if (!t) { portfolioError.value = 'Enter a ticker symbol'; return }
+  if (portfolioStocks.value.length >= maxPositions.value) {
+    portfolioError.value = `Max ${maxPositions.value} positions for your bankroll tier`; return
+  }
+  if (portfolioStocks.value.some(s => s.symbol === t)) {
+    portfolioError.value = `${t} is already in your portfolio`; return
+  }
+  portfolioLoading.value = true
+  portfolioError.value = null
+  try {
+    const r = await fetchAndCalc(t, bankroll.value, tradesPerYear.value)
+    portfolioStocks.value.push(r)
+    portfolioTicker.value = ''
+  } catch (e) {
+    portfolioError.value = e.message
+  } finally {
+    portfolioLoading.value = false
+  }
+}
+
+function removePortfolioStock(i) {
+  portfolioStocks.value.splice(i, 1)
+}
+
+function clearPortfolio() {
+  portfolioStocks.value = []
+  portfolioError.value = null
+}
+
+// ── My Positions (localStorage) ────────────────────────────────────────────
+const myPositions  = ref([])   // [{id, symbol, entryPrice, shares, dateAdded}]
+const myLiveData   = ref({})   // id → fetchAndCalc result
+const myTicker     = ref('')
+const myEntryPrice = ref('')
+const myShares     = ref('')
+const myFormError  = ref(null)
+const myAddLoading = ref(false)
+const myRefreshing = ref(false)
+
+function loadMyPositions() {
+  try {
+    const raw = localStorage.getItem('357_mypos')
+    if (raw) myPositions.value = JSON.parse(raw)
+    const br = localStorage.getItem('357_bankroll')
+    if (br) bankroll.value = parseFloat(br)
+  } catch { /* corrupt data — ignore */ }
+}
+
+function saveMyPositions() {
+  localStorage.setItem('357_mypos', JSON.stringify(myPositions.value))
+}
+
+onMounted(loadMyPositions)
+
+async function refreshPosition(pos) {
+  try {
+    const r = await fetchAndCalc(pos.symbol, bankroll.value, tradesPerYear.value, pos.entryPrice)
+    myLiveData.value = { ...myLiveData.value, [pos.id]: r }
+  } catch (e) {
+    myLiveData.value = { ...myLiveData.value, [pos.id]: { error: e.message } }
+  }
+}
+
+async function refreshAllPositions() {
+  if (!myPositions.value.length) return
+  myRefreshing.value = true
+  await Promise.all(myPositions.value.map(refreshPosition))
+  myRefreshing.value = false
+}
+
+async function addMyPosition() {
+  const t  = myTicker.value.trim().toUpperCase()
+  const ep = parseFloat(myEntryPrice.value)
+  const sh = parseInt(myShares.value, 10)
+  if (!t)            { myFormError.value = 'Enter a ticker symbol'; return }
+  if (!ep || ep <= 0){ myFormError.value = 'Enter a valid entry price'; return }
+  if (!sh || sh <= 0){ myFormError.value = 'Enter number of shares'; return }
+  myAddLoading.value = true
+  myFormError.value  = null
+  try {
+    const pos = {
+      id: Date.now().toString(),
+      symbol: t,
+      entryPrice: ep,
+      shares: sh,
+      dateAdded: new Date().toISOString().slice(0, 10),
+    }
+    await refreshPosition(pos)   // fetch live data before showing row
+    myPositions.value.push(pos)
+    saveMyPositions()
+    myTicker.value = ''
+    myEntryPrice.value = ''
+    myShares.value = ''
+  } catch (e) {
+    myFormError.value = e.message
+  } finally {
+    myAddLoading.value = false
+  }
+}
+
+function removeMyPosition(id) {
+  myPositions.value = myPositions.value.filter(p => p.id !== id)
+  const next = { ...myLiveData.value }
+  delete next[id]
+  myLiveData.value = next
+  saveMyPositions()
+}
+
+function myPosStatus(pos) {
+  const live = myLiveData.value[pos.id]
+  if (!live || live.error) return 'unknown'
+  const cur = live.current_price
+  if (cur >= live.profit_target) return 'target'
+  if (cur <= live.stop_price)    return 'stopped'
+  if (cur < pos.entryPrice)      return 'drawdown'
+  return 'profit'
+}
+
+function myPosPnL(pos) {
+  const live = myLiveData.value[pos.id]
+  if (!live || live.error) return null
+  const gain = live.current_price - pos.entryPrice
+  return {
+    dollars:      gain * pos.shares,
+    pct:          pos.entryPrice > 0 ? gain / pos.entryPrice * 100 : 0,
+    currentValue: live.current_price * pos.shares,
+    atRisk:       pos.shares * live.stop_distance,
+  }
+}
+
+const myPortfolioSummary = computed(() => {
+  const active = myPositions.value.filter(p => myLiveData.value[p.id] && !myLiveData.value[p.id].error)
+  if (!active.length) return null
+  let totalCost = 0, totalCurrentValue = 0, totalAtRisk = 0
+  for (const p of active) {
+    const pnl = myPosPnL(p)
+    totalCost         += p.entryPrice * p.shares
+    totalCurrentValue += pnl.currentValue
+    totalAtRisk       += pnl.atRisk
+  }
+  const totalPnL    = totalCurrentValue - totalCost
+  const totalPnLPct = totalCost > 0 ? totalPnL / totalCost * 100 : 0
+  const totalRiskPct = bankroll.value > 0 ? totalAtRisk / bankroll.value * 100 : 0
+  return { totalCost, totalCurrentValue, totalPnL, totalPnLPct, totalAtRisk, totalRiskPct }
+})
+
+// Auto-refresh when switching to this tab for the first time
+watch(currentView, v => {
+  if (v === 'mypos' && myPositions.value.length && !Object.keys(myLiveData.value).length) {
+    refreshAllPositions()
+  }
+})
 </script>
 
 <style>
@@ -1004,11 +1556,106 @@ tbody td{padding:.45rem .75rem;white-space:nowrap;}
 .cal-banner-val.accent{color:var(--accent);}
 .cal-banner-divider{width:1px;height:40px;background:var(--border);}
 
+/* Portfolio */
+.nav-tab-badge{display:inline-block;background:var(--accent);color:#000;font-size:.6rem;font-weight:800;padding:.1rem .4rem;border-radius:999px;margin-left:.4rem;vertical-align:middle;}
+
+.port-tier{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:1rem 1.25rem;margin-bottom:.25rem;}
+.port-tier-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem;}
+.port-tier-left{display:flex;align-items:baseline;gap:.75rem;}
+.port-tier-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;}
+.port-tier-amount{font-size:1.2rem;font-weight:700;color:var(--text);}
+.port-tier-badge{background:rgba(79,195,247,.15);color:var(--accent);border:1px solid rgba(79,195,247,.3);font-size:.75rem;font-weight:700;padding:.25rem .75rem;border-radius:999px;}
+.port-tier-note{font-size:.8rem;color:var(--muted);margin-bottom:.35rem;}
+.port-tier-math{font-size:.78rem;color:var(--muted);}
+.port-tier-math b{color:var(--text);}
+
+.port-error{background:rgba(239,83,80,.12);border:1px solid var(--danger);color:var(--danger);padding:.55rem .85rem;border-radius:6px;margin-top:.75rem;font-size:.85rem;}
+
+.port-stocks-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.25rem 1.5rem;margin-bottom:1.25rem;}
+.port-stocks-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;}
+.port-stocks-title{font-size:.95rem;font-weight:700;}
+.port-stocks-slots{font-size:.78rem;color:var(--muted);}
+
+.port-stock-row{display:flex;align-items:flex-start;gap:1rem;padding:.85rem 0;border-top:1px solid var(--border);}
+.port-stock-row:first-of-type{border-top:none;}
+.port-remove{background:none;border:1px solid var(--border);color:var(--muted);width:24px;height:24px;border-radius:4px;cursor:pointer;font-size:.7rem;flex-shrink:0;margin-top:.2rem;transition:border-color .15s,color .15s;}
+.port-remove:hover{border-color:var(--danger);color:var(--danger);}
+.port-stock-id{display:flex;flex-direction:column;min-width:60px;flex-shrink:0;}
+.port-stock-sym{font-weight:800;color:var(--accent);font-size:1.05rem;}
+.port-stock-price{font-size:.78rem;color:var(--muted);margin-top:.1rem;}
+.port-stock-cells{display:flex;flex-wrap:wrap;gap:.5rem;flex:1;}
+.port-cell{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:.4rem .65rem;min-width:80px;}
+.port-cell-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;margin-bottom:.15rem;}
+.port-cell-val{font-size:.95rem;font-weight:700;}
+.port-cell-sub{font-size:.65rem;color:var(--muted);margin-top:.1rem;}
+.port-accent{color:var(--accent);}
+.port-success{color:var(--success);}
+.port-danger{color:var(--danger);}
+
+.port-summary-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1.5rem;margin-bottom:1.25rem;}
+.port-sum-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem;}
+.port-sum-item{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem;}
+.port-sum-ok{border-color:rgba(102,187,106,.4);background:rgba(102,187,106,.05);}
+.port-sum-over{border-color:rgba(239,83,80,.4);background:rgba(239,83,80,.05);}
+.port-sum-warn{border-color:rgba(255,167,38,.4);background:rgba(255,167,38,.05);}
+.port-sum-lbl{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:.3rem;font-weight:600;}
+.port-sum-val{font-size:1.2rem;font-weight:700;margin-bottom:.2rem;}
+.port-sum-note{font-size:.72rem;color:var(--muted);}
+
+.port-risk-section{border-top:1px solid var(--border);padding-top:1.25rem;}
+.port-risk-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:.85rem;font-size:.82rem;font-weight:600;}
+.port-risk-limit-note{font-size:.75rem;color:var(--muted);}
+.port-risk-row{display:grid;grid-template-columns:60px 1fr 48px 80px;align-items:center;gap:.75rem;margin-bottom:.5rem;}
+.port-risk-total{margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border);font-weight:700;}
+.port-risk-sym{font-size:.82rem;font-weight:700;color:var(--text);}
+.port-risk-bar-bg{background:var(--surface2);border-radius:999px;height:10px;overflow:hidden;}
+.port-risk-bar-fill{height:100%;border-radius:999px;transition:width .4s;}
+.port-risk-pct{font-size:.8rem;font-weight:700;text-align:right;}
+.port-risk-dollars{font-size:.78rem;color:var(--muted);}
+.port-risk-rule-note{margin-top:1rem;font-size:.75rem;color:var(--muted);line-height:1.6;border-left:3px solid var(--border);padding-left:.75rem;}
+
+.port-empty{text-align:center;padding:3rem 1rem;color:var(--muted);}
+.port-empty-title{font-size:1rem;font-weight:700;margin-bottom:.5rem;color:var(--text);}
+.port-empty-sub{font-size:.85rem;line-height:1.6;max-width:400px;margin:0 auto;}
+
+/* My Positions */
+.mypos-header-row{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;}
+.mypos-title{font-size:1rem;font-weight:700;margin-bottom:.2rem;}
+.mypos-subtitle{font-size:.78rem;color:var(--muted);}
+
+.mypos-list{display:flex;flex-direction:column;gap:.75rem;margin-bottom:1.25rem;}
+
+.mypos-row{display:flex;align-items:flex-start;gap:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem 1.25rem;flex-wrap:wrap;}
+
+.mypos-status-col{display:flex;align-items:flex-start;padding-top:.15rem;flex-shrink:0;}
+.mypos-badge{font-size:.62rem;font-weight:800;padding:.25rem .5rem;border-radius:4px;white-space:nowrap;letter-spacing:.04em;}
+.mypos-badge-profit  {background:rgba(102,187,106,.2); color:var(--success);}
+.mypos-badge-target  {background:rgba(102,187,106,.3); color:var(--success);box-shadow:0 0 0 1px var(--success);}
+.mypos-badge-drawdown{background:rgba(255,167,38,.15); color:var(--warn);}
+.mypos-badge-stopped {background:rgba(239,83,80,.2);  color:var(--danger);}
+.mypos-badge-loading {background:var(--surface2);     color:var(--muted);}
+.mypos-badge-err     {background:rgba(239,83,80,.15); color:var(--danger);}
+
+.mypos-id-col{display:flex;flex-direction:column;min-width:55px;flex-shrink:0;}
+.mypos-sym{font-weight:800;color:var(--accent);font-size:1.05rem;}
+.mypos-date{font-size:.68rem;color:var(--muted);margin-top:.1rem;}
+
+.mypos-cells{display:flex;flex-wrap:wrap;gap:.45rem;flex:1;}
+.mypos-cell{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:.4rem .65rem;min-width:78px;}
+.mypos-cell-pnl{min-width:100px;}
+.mypos-cell-lbl{font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;margin-bottom:.15rem;}
+.mypos-cell-val{font-size:.92rem;font-weight:700;}
+.mypos-cell-sub{font-size:.65rem;color:var(--muted);margin-top:.1rem;}
+
 @media(max-width:680px){
   .rec-grid,.rules-grid{grid-template-columns:1fr;}
   .stats-row{grid-template-columns:repeat(2,1fr);}
   .model-grid{grid-template-columns:repeat(2,1fr);}
   .cal-banner{flex-direction:column;align-items:flex-start;}
   .cal-banner-divider{width:100%;height:1px;}
+  .port-sum-grid{grid-template-columns:repeat(2,1fr);}
+  .port-stock-row{flex-direction:column;}
+  .port-risk-row{grid-template-columns:50px 1fr 44px 70px;}
+  .mypos-row{flex-direction:column;}
 }
 </style>
