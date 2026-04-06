@@ -1,0 +1,4 @@
+.env
+backend/results/
+frontend/node_modules/
+dist/
